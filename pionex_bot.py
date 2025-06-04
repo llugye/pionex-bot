@@ -7,11 +7,11 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 
-# Variáveis de ambiente (Render já injeta automaticamente)
+# Variáveis do ambiente
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
@@ -20,20 +20,20 @@ EMAIL_SENHA = os.getenv("EMAIL_SENHA")
 SMTP_SERVIDOR = os.getenv("SMTP_SERVIDOR")
 SMTP_PORTA = int(os.getenv("SMTP_PORTA"))
 
-# Verificação de segurança
+# Segurança básica
 if not API_KEY or not API_SECRET:
     raise Exception("❌ API_KEY ou API_SECRET não configuradas no ambiente do Render.")
 
 BASE_URL = "https://api.pionex.com"
 ULTIMO_SINAL = {"horario": None, "sinal": None}
 
-# Geração da assinatura padrão Pionex
+# Assinatura Pionex
 def assinar_pionex(payload_str, timestamp):
     mensagem = str(timestamp) + payload_str
     assinatura = hmac.new(API_SECRET.encode(), mensagem.encode(), hashlib.sha256).hexdigest()
     return assinatura
 
-# Consulta o saldo disponível em USDT
+# Consulta saldo em USDT
 def consultar_saldo():
     endpoint = "/api/v1/balances"
     url = BASE_URL + endpoint
@@ -56,7 +56,7 @@ def consultar_saldo():
             return float(ativo["free"])
     return 0.0
 
-# Envia ordem de compra ou venda tipo market
+# Executa a ordem de compra/venda
 def criar_ordem_market(symbol, side, amount_usdt):
     endpoint = "/api/v1/order"
     url = BASE_URL + endpoint
@@ -80,12 +80,12 @@ def criar_ordem_market(symbol, side, amount_usdt):
 
     resposta = requests.post(url, headers=headers, json=corpo)
 
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ordem enviada: {side.upper()} {amount_usdt} USDT em {symbol}")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ORDEM ENVIADA: {side.upper()} {amount_usdt} USDT em {symbol}")
     print("Resposta da API:", resposta.status_code, resposta.text)
 
     return resposta.json()
 
-# Envia email com o resultado da ordem
+# Envia email com log da operação
 def enviar_email(mensagem):
     try:
         msg = MIMEText(mensagem)
@@ -100,7 +100,7 @@ def enviar_email(mensagem):
     except Exception as erro:
         print("Erro ao enviar e-mail:", erro)
 
-# Rota principal para receber alertas do TradingView
+# Recebe o alerta do TradingView
 @app.route("/pionexbot", methods=["POST"])
 def receber_alerta():
     dados = request.json
@@ -111,7 +111,6 @@ def receber_alerta():
     if not par or sinal not in ["buy", "sell"]:
         return "Sinal ou par inválido", 400
 
-    # Usa valor personalizado ou saldo total
     if valor_personalizado is not None:
         try:
             valor_usdt = float(valor_personalizado)
@@ -120,10 +119,17 @@ def receber_alerta():
     else:
         valor_usdt = consultar_saldo()
 
+    # LOG antes da execução
+    print(f"[DEBUG] Sinal recebido: {sinal.upper()} {valor_usdt} USDT no par {par}")
+
     resposta = criar_ordem_market(par, sinal, valor_usdt)
 
-    # Atualiza status
-    ULTIMO_SINAL["horario"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # LOG depois da execução
+    print(f"[DEBUG] Resultado da ordem: {resposta}")
+
+    # Atualiza status com fuso de Brasília
+    fuso_brasilia = timezone(timedelta(hours=-3))
+    ULTIMO_SINAL["horario"] = datetime.now(fuso_brasilia).strftime("%Y-%m-%d %H:%M:%S")
     ULTIMO_SINAL["sinal"] = sinal.upper()
 
     mensagem = f"💹 Sinal: {sinal.upper()} | Par: {par}\n💵 Valor: {valor_usdt} USDT\n📨 Resposta:\n{json.dumps(resposta, indent=2)}"
@@ -131,7 +137,7 @@ def receber_alerta():
 
     return jsonify(resposta)
 
-# Rota de status para saber se o bot está online
+# Status do bot
 @app.route("/status", methods=["GET"])
 def status():
     return jsonify({

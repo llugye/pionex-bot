@@ -92,7 +92,6 @@ def webhook():
 
     symbol = pair.replace("USDT", "_USDT")
     balance = get_balance()
-
     usdt_available = balance.get("USDT", 0)
     quote_amount = amount if amount > 0 else usdt_available
 
@@ -127,5 +126,4 @@ def webhook():
     return "Sinal inválido.", 400
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)

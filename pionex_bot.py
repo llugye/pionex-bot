@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import requests
 import os
+import json
 from datetime import datetime
 
 app = Flask(__name__)
@@ -53,7 +54,7 @@ def get_price(pair):
 
 def create_order(symbol, side, quote_amount):
     price = get_price(symbol)
-    qty = round(quote_amount / price, 6)  # cuidado com casas decimais
+    qty = round(quote_amount / price, 6)
     print(f"[ORDENANDO] {side.upper()} {symbol} com {qty} ({quote_amount} USDT ao preço de {price})")
 
     path = "/api/v1/order"
@@ -86,11 +87,9 @@ def webhook():
     if not pair or not signal:
         return "Faltando dados.", 400
 
-    # Atualiza status
     status_data["ultimo_horario"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status_data["ultimo_sinal"] = signal.upper()
 
-    # Adapta par BTCUSDT -> BTC_USDT
     symbol = pair.replace("USDT", "_USDT")
     balance = get_balance()
 
@@ -128,4 +127,5 @@ def webhook():
     return "Sinal inválido.", 400
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

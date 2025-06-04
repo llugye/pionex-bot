@@ -1,129 +1,141 @@
 from flask import Flask, request, jsonify
-import time
+import os
+from dotenv import load_dotenv
+import requests
 import hmac
 import hashlib
-import requests
-import os
+import time
+import smtplib
+from email.mime.text import MIMEText
 import json
 from datetime import datetime
 
+load_dotenv()
 app = Flask(__name__)
 
-API_KEY = os.getenv("PIONEX_API_KEY")
-API_SECRET = os.getenv("PIONEX_API_SECRET")
-API_BASE = "https://api.pionex.com"
+# Variáveis de ambiente
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
+EMAIL_DESTINO = os.getenv("EMAIL_DESTINO")
+EMAIL_SENHA = os.getenv("EMAIL_SENHA")
+SMTP_SERVIDOR = os.getenv("SMTP_SERVIDOR")
+SMTP_PORTA = int(os.getenv("SMTP_PORTA"))
 
-status_data = {
-    "status": "online",
-    "ultimo_horario": None,
-    "ultimo_sinal": None
-}
+BASE_URL = "https://api.pionex.com"
+ULTIMO_SINAL = {"horario": None, "sinal": None}
 
-def get_timestamp():
-    return str(int(time.time() * 1000))
+# Função de assinatura Pionex
+def assinar_pionex(payload_str, timestamp):
+    mensagem = str(timestamp) + payload_str
+    assinatura = hmac.new(API_SECRET.encode(), mensagem.encode(), hashlib.sha256).hexdigest()
+    return assinatura
 
-def sign_request(timestamp, method, request_path, body_str=""):
-    message = timestamp + method + request_path + body_str
-    signature = hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
-    return signature
+# Consulta saldo USDT na Pionex
+def consultar_saldo():
+    endpoint = "/api/v1/balances"
+    url = BASE_URL + endpoint
+    timestamp = str(int(time.time() * 1000))
+    payload = ""
+    assinatura = assinar_pionex(payload, timestamp)
 
-def get_headers(method, path, body=""):
-    timestamp = get_timestamp()
-    signature = sign_request(timestamp, method, path, body)
-    return {
-        "PIONEX-KEY": API_KEY,
-        "PIONEX-SIGNATURE": signature,
-        "PIONEX-TIMESTAMP": timestamp,
+    headers = {
+        "P-ACCESS-KEY": API_KEY,
+        "P-ACCESS-SIGN": assinatura,
+        "P-ACCESS-TIMESTAMP": timestamp,
         "Content-Type": "application/json"
     }
 
-def get_balance():
-    path = "/api/v1/account/balances"
-    url = API_BASE + path
-    headers = get_headers("GET", path)
-    res = requests.get(url, headers=headers)
-    data = res.json()
-    return {item['asset']: float(item['free']) for item in data['data']}
+    resposta = requests.get(url, headers=headers)
+    dados = resposta.json()
 
-def get_price(pair):
-    path = f"/api/v1/market/ticker?symbol={pair}"
-    url = API_BASE + path
-    res = requests.get(url)
-    data = res.json()
-    return float(data['data']['price'])
+    for ativo in dados.get("data", []):
+        if ativo["asset"] == "USDT":
+            return float(ativo["free"])
+    return 0.0
 
-def create_order(symbol, side, quote_amount):
-    price = get_price(symbol)
-    qty = round(quote_amount / price, 6)
-    print(f"[ORDENANDO] {side.upper()} {symbol} com {qty} ({quote_amount} USDT ao preço de {price})")
-
-    path = "/api/v1/order"
-    url = API_BASE + path
-    body = {
+# Cria ordem de mercado com base no valor em USDT
+def criar_ordem_market(symbol, side, amount_usdt):
+    endpoint = "/api/v1/order"
+    url = BASE_URL + endpoint
+    corpo = {
         "symbol": symbol,
-        "side": side,
+        "side": side.lower(),
         "type": "market",
-        "quantity": str(qty)
+        "quoteOrderQty": str(amount_usdt)
     }
-    body_str = json.dumps(body)
-    headers = get_headers("POST", path, body_str)
-    res = requests.post(url, headers=headers, data=body_str)
-    print("[RESPOSTA API]", res.status_code, res.text)
-    return res.status_code == 200
 
-@app.route("/status")
-def status():
-    return jsonify(status_data)
+    payload_str = json.dumps(corpo)
+    timestamp = str(int(time.time() * 1000))
+    assinatura = assinar_pionex(payload_str, timestamp)
 
+    headers = {
+        "P-ACCESS-KEY": API_KEY,
+        "P-ACCESS-SIGN": assinatura,
+        "P-ACCESS-TIMESTAMP": timestamp,
+        "Content-Type": "application/json"
+    }
+
+    resposta = requests.post(url, headers=headers, json=corpo)
+
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Ordem enviada: {side.upper()} {amount_usdt} USDT em {symbol}")
+    print("Resposta da API:", resposta.status_code, resposta.text)
+
+    return resposta.json()
+
+# Envia e-mail com o resumo da operação
+def enviar_email(mensagem):
+    try:
+        msg = MIMEText(mensagem)
+        msg["Subject"] = "🔔 Ordem executada no Pionex"
+        msg["From"] = EMAIL_ORIGEM
+        msg["To"] = EMAIL_DESTINO
+
+        with smtplib.SMTP(SMTP_SERVIDOR, SMTP_PORTA) as servidor:
+            servidor.starttls()
+            servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
+            servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
+    except Exception as erro:
+        print("Erro ao enviar e-mail:", erro)
+
+# Rota principal que recebe o alerta do TradingView
 @app.route("/pionexbot", methods=["POST"])
-def webhook():
-    data = request.json
-    print("[WEBHOOK RECEBIDO]", data)
+def receber_alerta():
+    dados = request.json
+    par = dados.get("pair", "").replace("/", "").upper()
+    sinal = dados.get("signal", "").lower()
+    valor_personalizado = dados.get("amount")  # pode vir do alerta
 
-    pair = data.get("pair")
-    signal = data.get("signal")
-    amount = float(data.get("amount", 0))
+    if not par or sinal not in ["buy", "sell"]:
+        return "Sinal ou par inválido", 400
 
-    if not pair or not signal:
-        return "Faltando dados.", 400
+    if valor_personalizado is not None:
+        try:
+            valor_usdt = float(valor_personalizado)
+        except:
+            return "Valor de 'amount' inválido", 400
+    else:
+        valor_usdt = consultar_saldo()
 
-    status_data["ultimo_horario"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    status_data["ultimo_sinal"] = signal.upper()
+    resposta = criar_ordem_market(par, sinal, valor_usdt)
 
-    symbol = pair.replace("USDT", "_USDT")
-    balance = get_balance()
-    usdt_available = balance.get("USDT", 0)
-    quote_amount = amount if amount > 0 else usdt_available
+    # Atualiza status
+    ULTIMO_SINAL["horario"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ULTIMO_SINAL["sinal"] = sinal.upper()
 
-    if signal.lower() == "buy":
-        if quote_amount > 0:
-            success = create_order(symbol, "BUY", quote_amount)
-            return ("Ordem de compra executada." if success else "Erro ao comprar."), 200
-        else:
-            return "Sem saldo USDT disponível.", 200
+    mensagem = f"💹 Sinal: {sinal.upper()} | Par: {par}\n💵 Valor: {valor_usdt} USDT\n📨 Resposta:\n{json.dumps(resposta, indent=2)}"
+    enviar_email(mensagem)
 
-    elif signal.lower() == "sell":
-        asset = symbol.split("_")[0]
-        qty = balance.get(asset, 0)
-        if qty > 0:
-            print(f"[VENDA] {qty} {asset}")
-            path = "/api/v1/order"
-            url = API_BASE + path
-            body = {
-                "symbol": symbol,
-                "side": "SELL",
-                "type": "market",
-                "quantity": str(qty)
-            }
-            body_str = json.dumps(body)
-            headers = get_headers("POST", path, body_str)
-            res = requests.post(url, headers=headers, data=body_str)
-            print("[RESPOSTA API]", res.status_code, res.text)
-            return ("Ordem de venda executada." if res.status_code == 200 else "Erro ao vender."), 200
-        else:
-            return f"Sem saldo de {asset} para vender.", 200
+    return jsonify(resposta)
 
-    return "Sinal inválido.", 400
+# Rota de status
+@app.route("/status", methods=["GET"])
+def status():
+    return jsonify({
+        "status": "online",
+        "ultimo_horario": ULTIMO_SINAL["horario"],
+        "ultimo_sinal": ULTIMO_SINAL["sinal"]
+    })
 
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)

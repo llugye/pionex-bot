@@ -7,86 +7,68 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 
-# Variáveis de ambiente
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
-EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
-EMAIL_DESTINO = os.getenv("EMAIL_DESTINO")
-EMAIL_SENHA = os.getenv("EMAIL_SENHA")
-SMTP_SERVIDOR = os.getenv("SMTP_SERVIDOR")
-SMTP_PORTA = int(os.getenv("SMTP_PORTA"))
-
-if not API_KEY or not API_SECRET:
-    raise Exception("❌ API_KEY ou API_SECRET não configuradas no ambiente do Render.")
+# Variáveis de ambiente fornecidas pelo Render
+API_KEY = os.environ.get("API_KEY")
+API_SECRET = os.environ.get("API_SECRET")
+EMAIL_ORIGEM = os.environ.get("EMAIL_ORIGEM")
+EMAIL_DESTINO = os.environ.get("EMAIL_DESTINO")
+EMAIL_SENHA = os.environ.get("EMAIL_SENHA")
+SMTP_SERVIDOR = os.environ.get("SMTP_SERVIDOR")
+SMTP_PORTA = int(os.environ.get("SMTP_PORTA"))
 
 BASE_URL = "https://api.pionex.com"
 ULTIMO_SINAL = {"horario": None, "sinal": None}
 
-# Gera assinatura HMAC para a Pionex
-def assinar_pionex(payload_str, timestamp):
-    mensagem = str(timestamp) + payload_str
-    assinatura = hmac.new(API_SECRET.encode(), mensagem.encode(), hashlib.sha256).hexdigest()
-    return assinatura
-
-# Consulta o saldo de USDT
-def consultar_saldo():
-    endpoint = "/api/v1/balances"
-    url = BASE_URL + endpoint
+def assinar_requisicao(method, path, params=None, body=None):
     timestamp = str(int(time.time() * 1000))
-    payload = ""
-    assinatura = assinar_pionex(payload, timestamp)
+    if params is None:
+        params = {}
+    params['timestamp'] = timestamp
+    sorted_params = sorted(params.items())
+    query_string = '&'.join(f"{k}={v}" for k, v in sorted_params)
+    path_url = f"{path}?{query_string}"
+    message = f"{method.upper()}{path_url}"
+    if body:
+        message += json.dumps(body, separators=(',', ':'))
+    assinatura = hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return assinatura, timestamp, query_string
 
+def consultar_saldo():
+    path = "/api/v1/account"
+    assinatura, timestamp, query_string = assinar_requisicao("GET", path)
     headers = {
-        "P-ACCESS-KEY": API_KEY,
-        "P-ACCESS-SIGN": assinatura,
-        "P-ACCESS-TIMESTAMP": timestamp,
-        "Content-Type": "application/json"
+        "PIONEX-KEY": API_KEY,
+        "PIONEX-SIGNATURE": assinatura
     }
-
-    resposta = requests.get(url, headers=headers)
+    resposta = requests.get(f"{BASE_URL}{path}?{query_string}", headers=headers)
     dados = resposta.json()
-
-    for ativo in dados.get("data", []):
+    for ativo in dados.get("data", {}).get("balances", []):
         if ativo["asset"] == "USDT":
             return float(ativo["free"])
     return 0.0
 
-# Envia ordem de mercado
 def criar_ordem_market(symbol, side, amount_usdt):
-    endpoint = "/api/v1/order"
-    url = BASE_URL + endpoint
-    corpo = {
+    path = "/api/v1/trade/order"
+    body = {
         "symbol": symbol,
-        "side": side.lower(),
-        "type": "market",
-        "quoteOrderQty": str(amount_usdt)
+        "side": side.upper(),
+        "type": "MARKET",
+        "amount": str(amount_usdt)
     }
-
-    payload_str = json.dumps(corpo)
-    timestamp = str(int(time.time() * 1000))
-    assinatura = assinar_pionex(payload_str, timestamp)
-
+    assinatura, timestamp, query_string = assinar_requisicao("POST", path, body=body)
     headers = {
-        "P-ACCESS-KEY": API_KEY,
-        "P-ACCESS-SIGN": assinatura,
-        "P-ACCESS-TIMESTAMP": timestamp,
+        "PIONEX-KEY": API_KEY,
+        "PIONEX-SIGNATURE": assinatura,
         "Content-Type": "application/json"
     }
+    resposta = requests.post(f"{BASE_URL}{path}?{query_string}", headers=headers, json=body)
+    return resposta.json()
 
-    try:
-        resposta = requests.post(url, headers=headers, json=corpo)
-        print(f"[{datetime.now()}] ORDEM ENVIADA: {side.upper()} {amount_usdt} USDT em {symbol}", flush=True)
-        print("Resposta da API:", resposta.status_code, resposta.text, flush=True)
-        return resposta.json()
-    except Exception as e:
-        print("❌ ERRO AO ENVIAR ORDEM:", str(e), flush=True)
-        return {"erro": str(e)}
-
-# Envia e-mail com o resultado
 def enviar_email(mensagem):
     try:
         msg = MIMEText(mensagem)
@@ -99,9 +81,8 @@ def enviar_email(mensagem):
             servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
             servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
     except Exception as erro:
-        print("Erro ao enviar e-mail:", erro, flush=True)
+        print("Erro ao enviar e-mail:", erro)
 
-# Endpoint principal
 @app.route("/pionexbot", methods=["POST"])
 def receber_alerta():
     dados = request.json
@@ -120,14 +101,11 @@ def receber_alerta():
     else:
         valor_usdt = consultar_saldo()
 
-    print(f"[DEBUG] Sinal recebido: {sinal.upper()} {valor_usdt} USDT no par {par}", flush=True)
-
     resposta = criar_ordem_market(par, sinal, valor_usdt)
 
-    print(f"[DEBUG] Resultado da ordem: {resposta}", flush=True)
-
-    fuso_brasilia = timezone(timedelta(hours=-3))
-    ULTIMO_SINAL["horario"] = datetime.now(fuso_brasilia).strftime("%Y-%m-%d %H:%M:%S")
+    fuso_horario = pytz.timezone("America/Sao_Paulo")
+    horario_atual = datetime.now(fuso_horario).strftime("%Y-%m-%d %H:%M:%S")
+    ULTIMO_SINAL["horario"] = horario_atual
     ULTIMO_SINAL["sinal"] = sinal.upper()
 
     mensagem = f"💹 Sinal: {sinal.upper()} | Par: {par}\n💵 Valor: {valor_usdt} USDT\n📨 Resposta:\n{json.dumps(resposta, indent=2)}"
@@ -135,7 +113,6 @@ def receber_alerta():
 
     return jsonify(resposta)
 
-# Endpoint de status
 @app.route("/status", methods=["GET"])
 def status():
     return jsonify({
@@ -145,4 +122,4 @@ def status():
     })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080)

@@ -8,11 +8,10 @@ import smtplib
 from email.mime.text import MIMEText
 import json
 from datetime import datetime, timezone, timedelta
-import sys
 
 app = Flask(__name__)
 
-# Variáveis de ambiente do Render
+# Variáveis de ambiente
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
@@ -56,7 +55,7 @@ def consultar_saldo():
             return float(ativo["free"])
     return 0.0
 
-# Cria a ordem de compra/venda
+# Envia ordem de mercado
 def criar_ordem_market(symbol, side, amount_usdt):
     endpoint = "/api/v1/order"
     url = BASE_URL + endpoint
@@ -80,16 +79,14 @@ def criar_ordem_market(symbol, side, amount_usdt):
 
     try:
         resposta = requests.post(url, headers=headers, json=corpo)
-        print(f"[{datetime.now()}] ORDEM ENVIADA: {side.upper()} {amount_usdt} USDT em {symbol}")
-        print("Resposta da API:", resposta.status_code, resposta.text)
-        sys.stdout.flush()
+        print(f"[{datetime.now()}] ORDEM ENVIADA: {side.upper()} {amount_usdt} USDT em {symbol}", flush=True)
+        print("Resposta da API:", resposta.status_code, resposta.text, flush=True)
         return resposta.json()
     except Exception as e:
-        print("❌ ERRO AO ENVIAR ORDEM:", str(e))
-        sys.stdout.flush()
+        print("❌ ERRO AO ENVIAR ORDEM:", str(e), flush=True)
         return {"erro": str(e)}
 
-# Envia email com os dados da ordem
+# Envia e-mail com o resultado
 def enviar_email(mensagem):
     try:
         msg = MIMEText(mensagem)
@@ -102,10 +99,9 @@ def enviar_email(mensagem):
             servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
             servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
     except Exception as erro:
-        print("Erro ao enviar e-mail:", erro)
-        sys.stdout.flush()
+        print("Erro ao enviar e-mail:", erro, flush=True)
 
-# Endpoint principal do bot
+# Endpoint principal
 @app.route("/pionexbot", methods=["POST"])
 def receber_alerta():
     dados = request.json
@@ -124,15 +120,12 @@ def receber_alerta():
     else:
         valor_usdt = consultar_saldo()
 
-    print(f"[DEBUG] Sinal recebido: {sinal.upper()} {valor_usdt} USDT no par {par}")
-    sys.stdout.flush()
+    print(f"[DEBUG] Sinal recebido: {sinal.upper()} {valor_usdt} USDT no par {par}", flush=True)
 
     resposta = criar_ordem_market(par, sinal, valor_usdt)
 
-    print(f"[DEBUG] Resultado da ordem: {resposta}")
-    sys.stdout.flush()
+    print(f"[DEBUG] Resultado da ordem: {resposta}", flush=True)
 
-    # Horário em Brasília
     fuso_brasilia = timezone(timedelta(hours=-3))
     ULTIMO_SINAL["horario"] = datetime.now(fuso_brasilia).strftime("%Y-%m-%d %H:%M:%S")
     ULTIMO_SINAL["sinal"] = sinal.upper()
@@ -142,7 +135,7 @@ def receber_alerta():
 
     return jsonify(resposta)
 
-# Rota de status do bot
+# Endpoint de status
 @app.route("/status", methods=["GET"])
 def status():
     return jsonify({

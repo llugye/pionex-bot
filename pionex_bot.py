@@ -1,146 +1,131 @@
 from flask import Flask, request, jsonify
-import os
-from dotenv import load_dotenv
-import requests
+import time
 import hmac
 import hashlib
-import time
-import smtplib
-from email.mime.text import MIMEText
-import json
-from datetime import datetime, timedelta
+import requests
+import os
+from datetime import datetime
 
-load_dotenv()
 app = Flask(__name__)
 
-# Variáveis de ambiente
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
-EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
-EMAIL_DESTINO = os.getenv("EMAIL_DESTINO")
-EMAIL_SENHA = os.getenv("EMAIL_SENHA")
-SMTP_SERVIDOR = os.getenv("SMTP_SERVIDOR")
-SMTP_PORTA = int(os.getenv("SMTP_PORTA"))
+API_KEY = os.getenv("PIONEX_API_KEY")
+API_SECRET = os.getenv("PIONEX_API_SECRET")
+API_BASE = "https://api.pionex.com"
 
-BASE_URL = "https://api.pionex.com"
-
-status_info = {
+status_data = {
     "status": "online",
     "ultimo_horario": None,
     "ultimo_sinal": None
 }
 
-def assinar(query_string):
-    return hmac.new(API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
+def get_timestamp():
+    return str(int(time.time() * 1000))
 
-def consultar_saldo_usdt():
-    endpoint = "/api/v1/account"
-    timestamp = str(int(time.time() * 1000))
-    query_string = f"timestamp={timestamp}"
-    signature = assinar(query_string)
-    headers = {"X-MBX-APIKEY": API_KEY}
+def sign_request(timestamp, method, request_path, body_str=""):
+    message = timestamp + method + request_path + body_str
+    signature = hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return signature
 
-    url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
-    resposta = requests.get(url, headers=headers)
-    dados = resposta.json()
-
-    for ativo in dados.get("balances", []):
-        if ativo["asset"] == "USDT":
-            return float(ativo["free"])
-    return 0.0
-
-def consultar_saldo_moeda(par):
-    endpoint = "/api/v1/account"
-    timestamp = str(int(time.time() * 1000))
-    query_string = f"timestamp={timestamp}"
-    signature = assinar(query_string)
-    headers = {"X-MBX-APIKEY": API_KEY}
-
-    url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
-    resposta = requests.get(url, headers=headers)
-    dados = resposta.json()
-
-    moeda = par.replace("USDT", "")
-    for ativo in dados.get("balances", []):
-        if ativo["asset"] == moeda:
-            return float(ativo["free"])
-    return 0.0
-
-def criar_ordem_market(symbol, side, quantidade):
-    endpoint = "/api/v1/order"
-    timestamp = str(int(time.time() * 1000))
-
-    corpo = {
-        "symbol": symbol,
-        "side": side.upper(),
-        "type": "market"
+def get_headers(method, path, body=""):
+    timestamp = get_timestamp()
+    signature = sign_request(timestamp, method, path, body)
+    return {
+        "PIONEX-KEY": API_KEY,
+        "PIONEX-SIGNATURE": signature,
+        "PIONEX-TIMESTAMP": timestamp,
+        "Content-Type": "application/json"
     }
 
-    if side == "buy":
-        corpo["quoteOrderQty"] = str(quantidade)
-    else:
-        corpo["quantity"] = str(quantidade)
+def get_balance():
+    path = "/api/v1/account/balances"
+    url = API_BASE + path
+    headers = get_headers("GET", path)
+    res = requests.get(url, headers=headers)
+    data = res.json()
+    return {item['asset']: float(item['free']) for item in data['data']}
 
-    query = f"timestamp={timestamp}"
-    assinatura = assinar(query)
-    headers = {"X-MBX-APIKEY": API_KEY}
+def get_price(pair):
+    path = f"/api/v1/market/ticker?symbol={pair}"
+    url = API_BASE + path
+    res = requests.get(url)
+    data = res.json()
+    return float(data['data']['price'])
 
-    resposta = requests.post(
-        BASE_URL + endpoint + "?" + query + f"&signature={assinatura}",
-        headers=headers,
-        json=corpo
-    )
-    return resposta.json()
+def create_order(symbol, side, quote_amount):
+    price = get_price(symbol)
+    qty = round(quote_amount / price, 6)  # cuidado com casas decimais
+    print(f"[ORDENANDO] {side.upper()} {symbol} com {qty} ({quote_amount} USDT ao preço de {price})")
 
-def enviar_email(mensagem):
-    try:
-        msg = MIMEText(mensagem)
-        msg["Subject"] = "📊 Ordem executada no robô"
-        msg["From"] = EMAIL_ORIGEM
-        msg["To"] = EMAIL_DESTINO
+    path = "/api/v1/order"
+    url = API_BASE + path
+    body = {
+        "symbol": symbol,
+        "side": side,
+        "type": "market",
+        "quantity": str(qty)
+    }
+    body_str = json.dumps(body)
+    headers = get_headers("POST", path, body_str)
+    res = requests.post(url, headers=headers, data=body_str)
+    print("[RESPOSTA API]", res.status_code, res.text)
+    return res.status_code == 200
 
-        with smtplib.SMTP(SMTP_SERVIDOR, SMTP_PORTA) as servidor:
-            servidor.starttls()
-            servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
-            servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
-    except Exception as erro:
-        print("Erro ao enviar e-mail:", erro)
+@app.route("/status")
+def status():
+    return jsonify(status_data)
 
 @app.route("/pionexbot", methods=["POST"])
-def receber_sinal():
-    dados = request.json
-    par = dados.get("pair", "").replace("/", "").upper()
-    sinal = dados.get("signal", "").lower()
+def webhook():
+    data = request.json
+    print("[WEBHOOK RECEBIDO]", data)
 
-    if not par or sinal not in ["buy", "sell"]:
-        return jsonify({"erro": "Par ou sinal inválido"}), 400
+    pair = data.get("pair")
+    signal = data.get("signal")
+    amount = float(data.get("amount", 0))
 
-    try:
-        if sinal == "buy":
-            saldo_usdt = consultar_saldo_usdt()
-            if saldo_usdt > 5:
-                resposta = criar_ordem_market(par, "buy", saldo_usdt)
-            else:
-                resposta = {"erro": "Saldo USDT insuficiente para compra"}
-        elif sinal == "sell":
-            saldo_moeda = consultar_saldo_moeda(par)
-            if saldo_moeda > 0:
-                resposta = criar_ordem_market(par, "sell", saldo_moeda)
-            else:
-                resposta = {"erro": "Sem moedas para vender"}
+    if not pair or not signal:
+        return "Faltando dados.", 400
 
-        # Atualiza status
-        status_info["ultimo_sinal"] = sinal.upper()
-        status_info["ultimo_horario"] = (datetime.utcnow() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+    # Atualiza status
+    status_data["ultimo_horario"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status_data["ultimo_sinal"] = signal.upper()
 
-        enviar_email(json.dumps(resposta, indent=2))
-        return jsonify(resposta)
-    except Exception as e:
-        return jsonify({"erro": str(e)}), 500
+    # Adapta par BTCUSDT -> BTC_USDT
+    symbol = pair.replace("USDT", "_USDT")
+    balance = get_balance()
 
-@app.route("/status", methods=["GET"])
-def status():
-    return jsonify(status_info)
+    usdt_available = balance.get("USDT", 0)
+    quote_amount = amount if amount > 0 else usdt_available
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    if signal.lower() == "buy":
+        if quote_amount > 0:
+            success = create_order(symbol, "BUY", quote_amount)
+            return ("Ordem de compra executada." if success else "Erro ao comprar."), 200
+        else:
+            return "Sem saldo USDT disponível.", 200
+
+    elif signal.lower() == "sell":
+        asset = symbol.split("_")[0]
+        qty = balance.get(asset, 0)
+        if qty > 0:
+            print(f"[VENDA] {qty} {asset}")
+            path = "/api/v1/order"
+            url = API_BASE + path
+            body = {
+                "symbol": symbol,
+                "side": "SELL",
+                "type": "market",
+                "quantity": str(qty)
+            }
+            body_str = json.dumps(body)
+            headers = get_headers("POST", path, body_str)
+            res = requests.post(url, headers=headers, data=body_str)
+            print("[RESPOSTA API]", res.status_code, res.text)
+            return ("Ordem de venda executada." if res.status_code == 200 else "Erro ao vender."), 200
+        else:
+            return f"Sem saldo de {asset} para vender.", 200
+
+    return "Sinal inválido.", 400
+
+if __name__ == '__main__':
+    app.run(debug=True)

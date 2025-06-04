@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 import os
-from dotenv import load_dotenv
 import requests
 import hmac
 import hashlib
@@ -10,10 +9,9 @@ from email.mime.text import MIMEText
 import json
 from datetime import datetime
 
-load_dotenv()
 app = Flask(__name__)
 
-# Variáveis de ambiente
+# Variáveis de ambiente (Render já injeta automaticamente)
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
@@ -22,16 +20,20 @@ EMAIL_SENHA = os.getenv("EMAIL_SENHA")
 SMTP_SERVIDOR = os.getenv("SMTP_SERVIDOR")
 SMTP_PORTA = int(os.getenv("SMTP_PORTA"))
 
+# Verificação de segurança
+if not API_KEY or not API_SECRET:
+    raise Exception("❌ API_KEY ou API_SECRET não configuradas no ambiente do Render.")
+
 BASE_URL = "https://api.pionex.com"
 ULTIMO_SINAL = {"horario": None, "sinal": None}
 
-# Função de assinatura Pionex
+# Geração da assinatura padrão Pionex
 def assinar_pionex(payload_str, timestamp):
     mensagem = str(timestamp) + payload_str
     assinatura = hmac.new(API_SECRET.encode(), mensagem.encode(), hashlib.sha256).hexdigest()
     return assinatura
 
-# Consulta saldo USDT na Pionex
+# Consulta o saldo disponível em USDT
 def consultar_saldo():
     endpoint = "/api/v1/balances"
     url = BASE_URL + endpoint
@@ -54,7 +56,7 @@ def consultar_saldo():
             return float(ativo["free"])
     return 0.0
 
-# Cria ordem de mercado com base no valor em USDT
+# Envia ordem de compra ou venda tipo market
 def criar_ordem_market(symbol, side, amount_usdt):
     endpoint = "/api/v1/order"
     url = BASE_URL + endpoint
@@ -83,7 +85,7 @@ def criar_ordem_market(symbol, side, amount_usdt):
 
     return resposta.json()
 
-# Envia e-mail com o resumo da operação
+# Envia email com o resultado da ordem
 def enviar_email(mensagem):
     try:
         msg = MIMEText(mensagem)
@@ -98,17 +100,18 @@ def enviar_email(mensagem):
     except Exception as erro:
         print("Erro ao enviar e-mail:", erro)
 
-# Rota principal que recebe o alerta do TradingView
+# Rota principal para receber alertas do TradingView
 @app.route("/pionexbot", methods=["POST"])
 def receber_alerta():
     dados = request.json
     par = dados.get("pair", "").replace("/", "").upper()
     sinal = dados.get("signal", "").lower()
-    valor_personalizado = dados.get("amount")  # pode vir do alerta
+    valor_personalizado = dados.get("amount")
 
     if not par or sinal not in ["buy", "sell"]:
         return "Sinal ou par inválido", 400
 
+    # Usa valor personalizado ou saldo total
     if valor_personalizado is not None:
         try:
             valor_usdt = float(valor_personalizado)
@@ -128,7 +131,7 @@ def receber_alerta():
 
     return jsonify(resposta)
 
-# Rota de status
+# Rota de status para saber se o bot está online
 @app.route("/status", methods=["GET"])
 def status():
     return jsonify({

@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import os
 from dotenv import load_dotenv
 import requests
@@ -23,103 +23,118 @@ SMTP_PORTA = int(os.getenv("SMTP_PORTA"))
 
 BASE_URL = "https://api.pionex.com"
 
-# Função para assinar requisições
+# Estado atual
+estado_bot = {
+    "status": "online",
+    "ultimo_sinal": None,
+    "ultimo_horario": None
+}
 
 def assinar(query_string):
     return hmac.new(API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
 
-# Consultar saldo da carteira
-
 def consultar_saldo():
     endpoint = "/api/v1/account"
     timestamp = str(int(time.time() * 1000))
-    query_string = f"timestamp={timestamp}"
-    signature = assinar(query_string)
+    query = f"timestamp={timestamp}"
+    assinatura = assinar(query)
     headers = {"X-MBX-APIKEY": API_KEY}
-
-    resposta = requests.get(
-        f"{BASE_URL}{endpoint}?{query_string}&signature={signature}", headers=headers)
-
-    if resposta.status_code == 200:
-        return resposta.json()
-    else:
-        return None
-
-# Função para obter saldo disponível de um ativo específico
-
-def saldo_ativo(ativo):
-    dados = consultar_saldo()
-    if not dados:
-        return 0.0
-    for item in dados.get("balances", []):
-        if item["asset"] == ativo:
-            return float(item["free"])
+    url = f"{BASE_URL}{endpoint}?{query}&signature={assinatura}"
+    resposta = requests.get(url, headers=headers)
+    for ativo in resposta.json().get("balances", []):
+        if ativo["asset"] == "USDT":
+            return float(ativo["free"])
     return 0.0
 
-# Criar ordem de mercado
-
-def criar_ordem_market(par, lado, quantidade):
+def vender_tudo(symbol):
     endpoint = "/api/v1/order"
     timestamp = str(int(time.time() * 1000))
+
+    # Consulta saldo da moeda
+    saldo_url = f"{BASE_URL}/api/v1/account?timestamp={timestamp}&signature={assinar(f'timestamp={timestamp}')}"
     headers = {"X-MBX-APIKEY": API_KEY}
+    resposta = requests.get(saldo_url, headers=headers).json()
+    moeda = symbol.replace("USDT", "")
+    quantidade = 0.0
+
+    for ativo in resposta.get("balances", []):
+        if ativo["asset"] == moeda:
+            quantidade = float(ativo["free"])
+            break
+
+    if quantidade <= 0:
+        return {"erro": f"Sem saldo em {moeda}"}
 
     corpo = {
-        "symbol": par,
-        "side": lado.upper(),
-        "type": "market"
+        "symbol": symbol,
+        "side": "SELL",
+        "type": "market",
+        "quantity": str(quantidade)
     }
-
-    if lado.lower() == "buy":
-        corpo["quoteOrderQty"] = str(quantidade)  # Em USDT
-    else:
-        corpo["quantity"] = str(quantidade)  # Em cripto
 
     query = f"timestamp={timestamp}"
     assinatura = assinar(query)
+    url = f"{BASE_URL}{endpoint}?{query}&signature={assinatura}"
+    return requests.post(url, headers=headers, json=corpo).json()
 
-    resposta = requests.post(
-        f"{BASE_URL}{endpoint}?{query}&signature={assinatura}",
-        headers=headers,
-        json=corpo
-    )
-    return resposta.json()
+def comprar_tudo(symbol):
+    usdt = consultar_saldo()
+    if usdt < 5:  # valor mínimo por ordem
+        return {"erro": "Saldo USDT insuficiente"}
 
-# Enviar email com resultado
+    endpoint = "/api/v1/order"
+    timestamp = str(int(time.time() * 1000))
+    corpo = {
+        "symbol": symbol,
+        "side": "BUY",
+        "type": "market",
+        "quoteOrderQty": str(usdt)
+    }
+
+    query = f"timestamp={timestamp}"
+    assinatura = assinar(query)
+    headers = {"X-MBX-APIKEY": API_KEY}
+    url = f"{BASE_URL}{endpoint}?{query}&signature={assinatura}"
+    return requests.post(url, headers=headers, json=corpo).json()
 
 def enviar_email(mensagem):
     try:
         msg = MIMEText(mensagem)
-        msg["Subject"] = "📊 Ordem Executada"
+        msg["Subject"] = "📊 Sinal do Bot Executado"
         msg["From"] = EMAIL_ORIGEM
         msg["To"] = EMAIL_DESTINO
-
         with smtplib.SMTP(SMTP_SERVIDOR, SMTP_PORTA) as servidor:
             servidor.starttls()
             servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
             servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
-    except Exception as erro:
-        print("Erro ao enviar e-mail:", erro)
+    except Exception as e:
+        print("Erro ao enviar e-mail:", e)
 
 @app.route("/pionexbot", methods=["POST"])
 def receber_alerta():
     dados = request.json
-    par = dados.get("pair", "").replace("/", "").upper()
-    sinal = dados.get("signal", "").lower()
+    symbol = dados.get("pair", "").replace("/", "").upper()
+    signal = dados.get("signal", "").lower()
 
-    if not par or sinal not in ["buy", "sell"]:
-        return "Par ou sinal inválido", 400
+    if not symbol or signal not in ["buy", "sell"]:
+        return jsonify({"erro": "Sinal inválido"}), 400
 
-    if sinal == "buy":
-        saldo_usdt = saldo_ativo("USDT")
-        resposta = criar_ordem_market(par, "buy", saldo_usdt)
-    elif sinal == "sell":
-        moeda = par.replace("USDT", "")
-        saldo_moeda = saldo_ativo(moeda)
-        resposta = criar_ordem_market(par, "sell", saldo_moeda)
+    if signal == "buy":
+        resposta = comprar_tudo(symbol)
+    else:
+        resposta = vender_tudo(symbol)
 
-    mensagem = f"💡 Sinal: {sinal.upper()} | Par: {par}\n\n📥 Resposta:\n{json.dumps(resposta, indent=2)}"
+    estado_bot["ultimo_sinal"] = signal.upper()
+    estado_bot["ultimo_horario"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    mensagem = f"💡 Sinal: {signal.upper()} | Par: {symbol}\n\n📥 Resposta:\n{json.dumps(resposta, indent=2)}"
     enviar_email(mensagem)
-    return json.dumps(resposta)
+
+    return jsonify(resposta)
+
+@app.route("/status", methods=["GET"])
+def status():
+    return jsonify(estado_bot)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)

@@ -2,6 +2,7 @@ import os
 import hmac
 import hashlib
 import requests
+import json
 from flask import Flask, request, jsonify
 from datetime import datetime
 import pytz
@@ -9,19 +10,18 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# Dados da API
+# === CHAVES DE AMBIENTE ===
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 BASE_URL = "https://api.pionex.com"
 
-# E-mail
 EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
 EMAIL_DESTINO = os.getenv("EMAIL_DESTINO")
 EMAIL_SENHA = os.getenv("EMAIL_SENHA")
 SMTP_SERVIDOR = os.getenv("SMTP_SERVIDOR")
 SMTP_PORTA = int(os.getenv("SMTP_PORTA", 587))
 
-# Status global
+# === STATUS DO BOT ===
 status_data = {
     "status": "online",
     "ultimo_horario": None,
@@ -32,14 +32,14 @@ status_data = {
 app = Flask(__name__)
 tz = pytz.timezone('America/Sao_Paulo')
 
-# Timestamp
+# === GERA TIMESTAMP EM MILISSEGUNDOS ===
 def get_timestamp():
     return str(int(datetime.utcnow().timestamp() * 1000))
 
-# Assinatura da requisição
+# === GERA ASSINATURA PARA A API ===
 def sign_request(method, path, query='', body=''):
     if not API_KEY or not API_SECRET:
-        raise EnvironmentError("Erro: API_KEY ou API_SECRET não estão definidos.")
+        raise EnvironmentError("Erro: API_KEY ou API_SECRET não definidos.")
     timestamp = get_timestamp()
     sorted_query = '&'.join(sorted(filter(None, query.split('&'))))
     full_path = f"{path}?{sorted_query}" if sorted_query else path
@@ -47,7 +47,7 @@ def sign_request(method, path, query='', body=''):
     signature = hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
     return timestamp, signature
 
-# E-mail
+# === ENVIA E-MAIL ===
 def enviar_email(assunto, corpo):
     try:
         msg = MIMEMultipart()
@@ -61,56 +61,68 @@ def enviar_email(assunto, corpo):
             servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
             servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
     except Exception as e:
-        print(f"[EMAIL ERRO] {e}")
+        print(f"[ERRO AO ENVIAR EMAIL] {e}")
 
-# Consulta saldo
+# === CONSULTA SALDO DISPONÍVEL EM USDT ===
 def get_balance_usdt():
-    method = "GET"
-    path = "/api/v1/account/balances"
-    query = ""
-    timestamp, signature = sign_request(method, path, query)
-    headers = {
-        "PIONEX-KEY": API_KEY,
-        "PIONEX-SIGNATURE": signature,
-        "timestamp": timestamp
-    }
-    response = requests.get(BASE_URL + path, headers=headers)
-    data = response.json()
+    try:
+        method = "GET"
+        path = "/api/v1/account/balances"
+        query = ""
+        timestamp, signature = sign_request(method, path, query)
+        headers = {
+            "PIONEX-KEY": API_KEY,
+            "PIONEX-SIGNATURE": signature,
+            "timestamp": timestamp
+        }
+        response = requests.get(BASE_URL + path, headers=headers)
+        data = response.json()
 
-    if data.get("result"):
-        for coin in data["data"]["balances"]:
-            if coin["coin"] == "USDT":
-                return float(coin["free"])
+        if data.get("result"):
+            for coin in data["data"]["balances"]:
+                if coin["coin"] == "USDT":
+                    return float(coin["free"])
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Erro de requisição ao consultar saldo: {e}")
+    except Exception as e:
+        print(f"❌ Erro ao converter saldo: {e}")
     return 0
 
-# Status
+# === ROTA DE STATUS DO BOT ===
 @app.route("/status", methods=["GET"])
 def status():
     status_data["hora_servidor"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(status_data)
 
-# Webhook do TradingView
+# === ROTA DE RECEBIMENTO DE SINAIS ===
 @app.route("/pionexbot", methods=["POST"])
 def receive_signal():
-    data = request.json
-    pair = data.get("pair")         # ex: "BTCUSDT"
-    signal = data.get("signal")     # "buy" ou "sell"
+    data = request.get_json(force=True)
+    pair = data.get("pair")
+    signal = data.get("signal")
     amount = data.get("amount")
 
     try:
         if not pair or not signal:
-            return jsonify({"error": "Parâmetros obrigatórios ausentes."}), 400
+            return jsonify({"error": "Parâmetros obrigatórios ausentes: 'pair' ou 'signal'."}), 400
 
         if not amount:
             amount = get_balance_usdt()
+            if amount <= 0:
+                return jsonify({"error": "Saldo insuficiente para executar ordem."}), 400
         else:
             amount = float(amount)
 
         method = "POST"
         path = "/api/v1/trade/order"
         query = ""
-        body = f'{{"symbol":"{pair}","side":"{signal}","quoteOrderQty":{amount}}}'
-        timestamp, signature = sign_request(method, path, query, body)
+        body_dict = {
+            "symbol": pair,
+            "side": signal.lower(),
+            "quoteOrderQty": amount
+        }
+        body_json = json.dumps(body_dict)
+        timestamp, signature = sign_request(method, path, query, body_json)
 
         headers = {
             "PIONEX-KEY": API_KEY,
@@ -119,9 +131,22 @@ def receive_signal():
             "Content-Type": "application/json"
         }
 
-        response = requests.post(BASE_URL + path, headers=headers, data=body)
-        res_json = response.json()
+        # DEBUG PRINTS
+        print("\n📤 Enviando ordem para Pionex")
+        print("🪙 Par:", pair)
+        print("📊 Sinal:", signal)
+        print("💵 Quantidade:", amount)
+        print("📦 Payload:", body_json)
 
+        response = requests.post(BASE_URL + path, headers=headers, json=body_dict)
+        print("📥 Resposta:", response.status_code, response.text)
+
+        try:
+            res_json = response.json()
+        except Exception:
+            res_json = {"error": "Erro ao interpretar resposta da API da Pionex."}
+
+        # Atualiza status do bot
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         status_data["ultimo_sinal"] = f"{signal.upper()} {pair}"
 
@@ -133,9 +158,10 @@ def receive_signal():
             return jsonify({"error": res_json}), 400
 
     except Exception as e:
+        print(f"[ERRO INTERNO] {str(e)}")
         enviar_email("❌ ERRO INTERNO", str(e))
         return jsonify({"error": str(e)}), 500
 
-# Inicializa
+# === INICIALIZAÇÃO ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

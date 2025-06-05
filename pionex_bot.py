@@ -1,22 +1,24 @@
 from flask import Flask, request, jsonify
+import os
 import time
 import hmac
 import hashlib
 import requests
-import os
+import pytz
+from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
-from datetime import datetime
-import pytz
 
 app = Flask(__name__)
 
+# Ambiente Render
 API_KEY = os.getenv("PIONEX_API_KEY")
 API_SECRET = os.getenv("PIONEX_API_SECRET")
+SMTP_USER = os.getenv("EMAIL_USER")
+SMTP_PASS = os.getenv("EMAIL_PASS")
+SMTP_TO = os.getenv("EMAIL_TO")
+
 API_BASE = "https://api.pionex.com"
-EMAIL_FROM = os.getenv("EMAIL_FROM")
-EMAIL_PASS = os.getenv("EMAIL_PASS")
-EMAIL_TO = os.getenv("EMAIL_TO")
 
 status_data = {
     "status": "online",
@@ -27,27 +29,17 @@ status_data = {
 def get_timestamp():
     return str(int(time.time() * 1000))
 
-def send_email(subject, body):
-    try:
-        msg = MIMEText(body)
-        msg['Subject'] = subject
-        msg['From'] = EMAIL_FROM
-        msg['To'] = EMAIL_TO
+def get_server_time():
+    tz = pytz.timezone("America/Sao_Paulo")
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
-        with smtplib.SMTP("smtp.hostgator.com", 587) as server:
-            server.starttls()
-            server.login(EMAIL_FROM, EMAIL_PASS)
-            server.send_message(msg)
-    except Exception as e:
-        print("Erro ao enviar e-mail:", e)
-
-def sign_request(method, path, query='', body=''):
+def sign_request(method, path, query_string="", body=""):
     timestamp = get_timestamp()
-    base_string = f"{method}{path}{query}{timestamp}{body}"
-    signature = hmac.new(API_SECRET.encode(), base_string.encode(), hashlib.sha256).hexdigest()
+    message = method + path + query_string + timestamp + body
+    signature = hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
     return timestamp, signature
 
-def get_balance():
+def get_balance_usdt():
     path = "/api/v1/account/balances"
     method = "GET"
     query = ""
@@ -55,76 +47,89 @@ def get_balance():
     headers = {
         "PIONEX-KEY": API_KEY,
         "PIONEX-SIGNATURE": signature,
-        "timestamp": timestamp
-    }
-    response = requests.get(API_BASE + path, headers=headers)
-    data = response.json()
-    if data.get("result"):
-        return data["data"].get("balances", [])
-    return []
-
-def get_usdt_balance():
-    for item in get_balance():
-        if item["coin"] == "USDT":
-            return float(item["free"])
-    return 0
-
-def create_order(symbol, side, amount):
-    path = "/api/v1/trade/order"
-    method = "POST"
-    body_dict = {
-        "symbol": symbol,
-        "side": side.upper(),
-        "orderType": "MARKET",
-        "quoteOrderQty": str(amount) if side.lower() == "buy" else None,
-        "baseOrderQty": str(amount) if side.lower() == "sell" else None
-    }
-    body = {k: v for k, v in body_dict.items() if v is not None}
-    body_str = str(body).replace("'", '"')
-    timestamp, signature = sign_request(method, path, '', body_str)
-    headers = {
-        "PIONEX-KEY": API_KEY,
-        "PIONEX-SIGNATURE": signature,
-        "timestamp": timestamp,
         "Content-Type": "application/json"
     }
-    response = requests.post(API_BASE + path, json=body, headers=headers)
-    return response.json()
+    url = f"{API_BASE}{path}?timestamp={timestamp}"
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    for item in data.get("data", {}).get("balances", []):
+        if item["coin"] == "USDT":
+            return float(item["free"])
+    return 0.0
 
-@app.route("/pionexbot", methods=["POST"])
-def pionexbot():
+def send_email(subject, body):
     try:
-        data = request.get_json()
-        symbol = data.get("pair")
-        signal = data.get("signal")
-        amount = data.get("amount")
-
-        if not symbol or not signal:
-            return jsonify({"error": "Parâmetros ausentes"}), 400
-
-        if not amount:
-            amount = get_usdt_balance()
-
-        result = create_order(symbol, signal, amount)
-
-        now = datetime.now(pytz.timezone("America/Sao_Paulo"))
-        status_data["ultimo_horario"] = now.strftime("%Y-%m-%d %H:%M:%S")
-        status_data["ultimo_sinal"] = signal.upper()
-
-        if result.get("result"):
-            send_email(f"ORDEM EXECUTADA", f"{signal.upper()} {amount} USDT em {symbol}")
-            return jsonify({"success": True, "data": result}), 200
-        else:
-            send_email("FALHA NA ORDEM", str(result))
-            return jsonify({"success": False, "data": result}), 500
-
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = SMTP_USER
+        msg["To"] = SMTP_TO
+        with smtplib.SMTP("smtp.hostgator.com.br", 587) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
     except Exception as e:
-        send_email("ERRO NO BOT", str(e))
-        return jsonify({"error": str(e)}), 500
+        print("Erro ao enviar e-mail:", e)
+
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({
+        "status": status_data["status"],
+        "ultimo_horario": status_data["ultimo_horario"],
+        "ultimo_sinal": status_data["ultimo_sinal"],
+        "versao": "1.0.0",
+        "hora_servidor": get_server_time()
+    })
 
 @app.route("/status", methods=["GET"])
 def status():
     return jsonify(status_data)
 
+@app.route("/pionexbot", methods=["POST"])
+def receive_signal():
+    data = request.get_json()
+    pair = data.get("pair")
+    signal = data.get("signal").upper()
+    amount = data.get("amount")
+
+    status_data["ultimo_horario"] = get_server_time()
+    status_data["ultimo_sinal"] = signal
+
+    if not pair or signal not in ["BUY", "SELL"]:
+        msg = "Par ou sinal inválido"
+        send_email("Erro ao executar operação", msg)
+        return jsonify({"erro": msg}), 400
+
+    if not amount:
+        amount = get_balance_usdt()
+    else:
+        try:
+            amount = float(amount)
+        except:
+            return jsonify({"erro": "Valor inválido"}), 400
+
+    path = "/api/v1/order/market"
+    method = "POST"
+    query = ""
+    timestamp, signature = sign_request(method, path, query, body := f'{{"symbol":"{pair}","side":"{signal}","quoteOrderQty":{amount}}}')
+    headers = {
+        "PIONEX-KEY": API_KEY,
+        "PIONEX-SIGNATURE": signature,
+        "Content-Type": "application/json"
+    }
+
+    url = f"{API_BASE}{path}?timestamp={timestamp}"
+    response = requests.post(url, headers=headers, data=body)
+    data = response.json()
+
+    if data.get("result"):
+        msg = f"✅ ORDEM {signal} ENVIADA:\nPar: {pair}\nValor: {amount} USDT\n{get_server_time()}"
+        send_email(f"Ordem executada {signal}", msg)
+        return jsonify(data)
+    else:
+        msg = f"❌ FALHA NA ORDEM:\n{data}\n{get_server_time()}"
+        send_email("Erro na operação", msg)
+        return jsonify(data), 500
+
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

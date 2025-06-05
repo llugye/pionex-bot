@@ -1,144 +1,138 @@
 from flask import Flask, request, jsonify
-import time
+import requests
+import os
 import hmac
 import hashlib
-import requests
+import time
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import os
+from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 
 API_KEY = os.getenv("PIONEX_API_KEY")
 API_SECRET = os.getenv("PIONEX_API_SECRET")
-BASE_URL = "https://api.pionex.com"
-
-EMAIL_HOST = "smtp.hostgator.com.br"
-EMAIL_PORT = 587
-EMAIL_USER = os.getenv("EMAIL_USER")  # contato@falcaofilmes.com.br
+EMAIL_HOST = os.getenv("EMAIL_HOST")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587))
+EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
-EMAIL_TO = os.getenv("EMAIL_TO")  # seu email destino para alertas
+EMAIL_TO = os.getenv("EMAIL_TO")
+API_BASE = "https://api.pionex.com"
 
-status_data = {
-    "status": "online",
-    "ultimo_horario": None,
-    "ultimo_sinal": None,
-    "ultimo_erro": None,
-    "saldo_atual": {}
-}
+def get_timestamp():
+    return str(int(time.time() * 1000))
 
-def enviar_email(assunto, corpo):
+def send_email(subject, body):
     try:
-        msg = MIMEMultipart()
+        msg = MIMEText(body)
+        msg['Subject'] = subject
         msg['From'] = EMAIL_USER
         msg['To'] = EMAIL_TO
-        msg['Subject'] = assunto
-
-        msg.attach(MIMEText(corpo, 'plain'))
 
         with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
             server.starttls()
             server.login(EMAIL_USER, EMAIL_PASS)
-            server.send_message(msg)
+            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
     except Exception as e:
-        print("Erro ao enviar email:", str(e))
+        print("Erro ao enviar e-mail:", e)
 
-def gerar_assinatura(metodo, path, query_string='', corpo=''):
-    base_string = f"{metodo}{path}"
-    if query_string:
-        base_string += f"?{query_string}"
-    if corpo:
-        base_string += corpo
+def sign_request(method, path, query='', body=''):
+    timestamp = get_timestamp()
+    if query:
+        path_url = f"{path}?{query}&timestamp={timestamp}"
+    else:
+        path_url = f"{path}?timestamp={timestamp}"
 
-    assinatura = hmac.new(API_SECRET.encode(), base_string.encode(), hashlib.sha256).hexdigest()
-    return assinatura
+    if method == 'POST':
+        message = method + path_url + body
+    else:
+        message = method + path_url
 
-def consultar_saldo():
-    timestamp = str(int(time.time() * 1000))
+    signature = hmac.new(
+        API_SECRET.encode(),
+        message.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    headers = {
+        'PIONEX-KEY': API_KEY,
+        'PIONEX-SIGNATURE': signature,
+        'Content-Type': 'application/json'
+    }
+    return path_url, headers
+
+def get_balance():
     path = "/api/v1/account/balances"
-    query = f"timestamp={timestamp}"
-    assinatura = gerar_assinatura("GET", path, query)
-
-    headers = {
-        "PIONEX-KEY": API_KEY,
-        "PIONEX-SIGNATURE": assinatura
-    }
-
-    url = f"{BASE_URL}{path}?{query}"
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200 and response.json().get("result"):
-        return response.json()["data"]["balances"]
-    else:
-        raise Exception("Erro ao consultar saldo: " + response.text)
-
-def executar_ordem(par, direcao, valor_usdt):
-    timestamp = str(int(time.time() * 1000))
-    path = "/api/v1/trade/order"
-    query = f"timestamp={timestamp}"
-
-    body = {
-        "symbol": par,
-        "side": direcao.upper(),
-        "type": "MARKET",
-        "quoteOrderQty": valor_usdt
-    }
-
-    assinatura = gerar_assinatura("POST", path, query, str(body).replace("'", '"'))
-    headers = {
-        "PIONEX-KEY": API_KEY,
-        "PIONEX-SIGNATURE": assinatura,
-        "Content-Type": "application/json"
-    }
-    url = f"{BASE_URL}{path}?{query}"
-
-    response = requests.post(url, headers=headers, json=body)
-    if response.status_code == 200 and response.json().get("result"):
-        return response.json()["data"]
-    else:
-        raise Exception("Erro ao executar ordem: " + response.text)
-
-@app.route("/status", methods=["GET"])
-def status():
-    return jsonify(status_data)
-
-@app.route("/pionexbot", methods=["POST"])
-def webhook():
+    path_url, headers = sign_request("GET", path)
+    url = f"{API_BASE}{path_url}"
     try:
-        conteudo = request.get_json()
-        par = conteudo.get("pair") or conteudo.get("symbol")
-        sinal = conteudo.get("signal") or conteudo.get("sinal")
-        amount = conteudo.get("amount")  # valor opcional
-
-        if not par or not sinal:
-            return jsonify({"erro": "Campos obrigatórios: pair e signal"}), 400
-
-        status_data["ultimo_horario"] = time.strftime('%Y-%m-%d %H:%M:%S')
-        status_data["ultimo_sinal"] = f"{sinal.upper()} em {par}"
-
-        saldo = consultar_saldo()
-        status_data["saldo_atual"] = {item['coin']: item['free'] for item in saldo if float(item['free']) > 0}
-
-        if amount:
-            valor = float(amount)
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        if data.get("result"):
+            return data["data"]["balances"]
         else:
-            usdt_disponivel = next((float(i['free']) for i in saldo if i['coin'] == 'USDT'), 0)
-            if usdt_disponivel <= 0:
-                raise Exception("Saldo USDT insuficiente")
-            valor = usdt_disponivel
-
-        resultado = executar_ordem(par, sinal, valor)
-
-        mensagem = f"Ordem executada: {sinal.upper()} {par} no valor de {valor} USDT\n\nDetalhes: {resultado}"
-        enviar_email(f"🚀 Ordem executada: {sinal.upper()} {par}", mensagem)
-
-        return jsonify({"mensagem": "Ordem enviada com sucesso", "detalhes": resultado})
-
+            send_email("Erro ao obter saldo", str(data))
+            return []
     except Exception as e:
-        erro = str(e)
-        status_data["ultimo_erro"] = erro
-        enviar_email("❌ Erro no Bot Pionex", erro)
-        return jsonify({"erro": erro}), 500
+        send_email("Erro ao consultar saldo", str(e))
+        return []
 
-if __name__ == "__main__":
-    app.run(debug=False)
+def criar_ordem(par, lado, amount):
+    path = "/api/v1/trade/order"
+    body_data = {
+        "symbol": par,
+        "side": lado.upper(),
+        "type": "MARKET"
+    }
+
+    if amount:
+        body_data["quoteOrderQty"] = float(amount)
+    else:
+        balances = get_balance()
+        usdt = next((b for b in balances if b['coin'] == 'USDT'), None)
+        if usdt:
+            body_data["quoteOrderQty"] = float(usdt['free'])
+
+    body_json = json.dumps(body_data, separators=(',', ':'))
+    path_url, headers = sign_request("POST", path, body=body_json)
+    url = f"{API_BASE}{path_url}"
+
+    try:
+        response = requests.post(url, headers=headers, data=body_json)
+        data = response.json()
+        if data.get("result"):
+            send_email("Ordem Executada", f"{lado.upper()} {par} no valor de {body_data['quoteOrderQty']}")
+        else:
+            send_email("Erro ao criar ordem", str(data))
+        return data
+    except Exception as e:
+        send_email("Erro de execução de ordem", str(e))
+        return {"erro": str(e)}
+
+@app.route("/pionexbot", methods=['POST'])
+def sinal():
+    conteudo = request.get_json()
+    par = conteudo.get("pair")
+    sinal = conteudo.get("signal")
+    amount = conteudo.get("amount")
+    
+    if not par or not sinal:
+        return jsonify({"erro": "Par ou sinal ausente"}), 400
+
+    resultado = criar_ordem(par, sinal, amount)
+    return jsonify(resultado)
+
+@app.route("/status", methods=['GET'])
+def status():
+    balances = get_balance()
+    tz_sp = pytz.timezone('America/Sao_Paulo')
+    agora = datetime.now(tz_sp).strftime("%Y-%m-%d %H:%M:%S")
+    return jsonify({
+        "status": "online",
+        "horario_sao_paulo": agora,
+        "saldos": balances
+    })
+
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=5000)

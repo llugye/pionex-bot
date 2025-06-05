@@ -9,12 +9,11 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# Dados da API
+# Variáveis de ambiente
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 BASE_URL = "https://api.pionex.com"
 
-# Dados de e-mail
 EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
 EMAIL_DESTINO = os.getenv("EMAIL_DESTINO")
 EMAIL_SENHA = os.getenv("EMAIL_SENHA")
@@ -30,7 +29,6 @@ status_data = {
 }
 
 app = Flask(__name__)
-
 tz = pytz.timezone('America/Sao_Paulo')
 
 def get_timestamp():
@@ -38,10 +36,9 @@ def get_timestamp():
 
 def sign_request(method, path, query='', body=''):
     if not API_KEY or not API_SECRET:
-        raise EnvironmentError("Erro: API_KEY ou API_SECRET não estão definidos nas variáveis de ambiente do Render.")
+        raise EnvironmentError("Erro: API_KEY ou API_SECRET não definidos.")
     timestamp = get_timestamp()
-    sorted_query = '&'.join(sorted(filter(None, query.split('&'))))
-    full_path = f"{path}?{sorted_query}" if sorted_query else path
+    full_path = f"{path}?{query}" if query else path
     message = f"{method.upper()}{full_path}{timestamp}{body}"
     signature = hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
     return timestamp, signature
@@ -53,12 +50,13 @@ def enviar_email(assunto, corpo):
         msg['To'] = EMAIL_DESTINO
         msg['Subject'] = assunto
         msg.attach(MIMEText(corpo, 'plain'))
+
         with smtplib.SMTP(SMTP_SERVIDOR, SMTP_PORTA) as servidor:
             servidor.starttls()
             servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
             servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
     except Exception as e:
-        print(f"Erro ao enviar e-mail: {e}")
+        print(f"[ERRO EMAIL] {e}")
 
 def get_balance_usdt():
     method = "GET"
@@ -97,6 +95,9 @@ def receive_signal():
         if not pair or not signal:
             return jsonify({"error": "Parâmetros obrigatórios ausentes."}), 400
 
+        # Remove underline e garante o formato correto
+        pair = pair.replace("_", "").upper()
+
         if not amount:
             amount = get_balance_usdt()
         else:
@@ -106,8 +107,8 @@ def receive_signal():
         path = "/api/v1/trade/order"
         query = ""
         body = f'{{"symbol":"{pair}","side":"{signal}","quoteOrderQty":{amount}}}'
-        timestamp, signature = sign_request(method, path, query, body)
 
+        timestamp, signature = sign_request(method, path, query, body)
         headers = {
             "PIONEX-KEY": API_KEY,
             "PIONEX-SIGNATURE": signature,
@@ -115,14 +116,18 @@ def receive_signal():
             "Content-Type": "application/json"
         }
 
-        response = requests.post(BASE_URL + path, headers=headers, json={
-            "symbol": pair,
-            "side": signal,
-            "quoteOrderQty": amount
-        })
+        print("\n===== ENVIANDO ORDEM PARA PIONEX =====")
+        print("Pair:", pair)
+        print("Signal:", signal)
+        print("Amount:", amount)
+        print("Body:", body)
+        print("Headers:", headers)
+        print("======================================\n")
 
+        response = requests.post(BASE_URL + path, headers=headers, data=body)
         res_json = response.json()
-        print("DEBUG resposta:", res_json)  # útil para logs
+
+        print("[RESPOSTA PIONEX]", res_json)
 
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         status_data["ultimo_sinal"] = f"{signal.upper()} {pair}"
@@ -135,6 +140,7 @@ def receive_signal():
             return jsonify({"error": res_json}), 400
 
     except Exception as e:
+        print(f"[ERRO GERAL] {str(e)}")
         enviar_email("❌ Erro Interno no Bot", str(e))
         return jsonify({"error": str(e)}), 500
 

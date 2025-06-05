@@ -12,61 +12,56 @@ import pytz
 
 app = Flask(__name__)
 
-# Variáveis de ambiente fornecidas pelo Render
-API_KEY = os.environ.get("API_KEY")
-API_SECRET = os.environ.get("API_SECRET")
-EMAIL_ORIGEM = os.environ.get("EMAIL_ORIGEM")
-EMAIL_DESTINO = os.environ.get("EMAIL_DESTINO")
-EMAIL_SENHA = os.environ.get("EMAIL_SENHA")
-SMTP_SERVIDOR = os.environ.get("SMTP_SERVIDOR")
-SMTP_PORTA = int(os.environ.get("SMTP_PORTA"))
+# Variáveis de ambiente do Render
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+EMAIL_ORIGEM = os.getenv("EMAIL_ORIGEM")
+EMAIL_DESTINO = os.getenv("EMAIL_DESTINO")
+EMAIL_SENHA = os.getenv("EMAIL_SENHA")
+SMTP_SERVIDOR = os.getenv("SMTP_SERVIDOR")
+SMTP_PORTA = int(os.getenv("SMTP_PORTA"))
 
 BASE_URL = "https://api.pionex.com"
 ULTIMO_SINAL = {"horario": None, "sinal": None}
 
-def assinar_requisicao(method, path, params=None, body=None):
-    timestamp = str(int(time.time() * 1000))
-    if params is None:
-        params = {}
-    params['timestamp'] = timestamp
-    sorted_params = sorted(params.items())
-    query_string = '&'.join(f"{k}={v}" for k, v in sorted_params)
-    path_url = f"{path}?{query_string}"
-    message = f"{method.upper()}{path_url}"
-    if body:
-        message += json.dumps(body, separators=(',', ':'))
-    assinatura = hmac.new(API_SECRET.encode(), message.encode(), hashlib.sha256).hexdigest()
-    return assinatura, timestamp, query_string
+def assinar(query_string):
+    return hmac.new(API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
 
 def consultar_saldo():
-    path = "/api/v1/account"
-    assinatura, timestamp, query_string = assinar_requisicao("GET", path)
-    headers = {
-        "PIONEX-KEY": API_KEY,
-        "PIONEX-SIGNATURE": assinatura
-    }
-    resposta = requests.get(f"{BASE_URL}{path}?{query_string}", headers=headers)
+    endpoint = "/api/v1/account"
+    timestamp = str(int(time.time() * 1000))
+    query_string = f"timestamp={timestamp}"
+    assinatura = assinar(query_string)
+    headers = {"X-MBX-APIKEY": API_KEY}
+
+    resposta = requests.get(
+        BASE_URL + endpoint + "?" + query_string + f"&signature={assinatura}",
+        headers=headers
+    )
     dados = resposta.json()
-    for ativo in dados.get("data", {}).get("balances", []):
+    for ativo in dados.get("balances", []):
         if ativo["asset"] == "USDT":
             return float(ativo["free"])
     return 0.0
 
 def criar_ordem_market(symbol, side, amount_usdt):
-    path = "/api/v1/trade/order"
-    body = {
+    endpoint = "/api/v1/order"
+    timestamp = str(int(time.time() * 1000))
+    corpo = {
         "symbol": symbol,
         "side": side.upper(),
-        "type": "MARKET",
-        "amount": str(amount_usdt)
+        "type": "market",
+        "quoteOrderQty": str(amount_usdt)
     }
-    assinatura, timestamp, query_string = assinar_requisicao("POST", path, body=body)
-    headers = {
-        "PIONEX-KEY": API_KEY,
-        "PIONEX-SIGNATURE": assinatura,
-        "Content-Type": "application/json"
-    }
-    resposta = requests.post(f"{BASE_URL}{path}?{query_string}", headers=headers, json=body)
+    query = f"timestamp={timestamp}"
+    assinatura = assinar(query)
+    headers = {"X-MBX-APIKEY": API_KEY}
+
+    resposta = requests.post(
+        BASE_URL + endpoint + "?" + query + f"&signature={assinatura}",
+        headers=headers,
+        json=corpo
+    )
     return resposta.json()
 
 def enviar_email(mensagem):
@@ -81,37 +76,51 @@ def enviar_email(mensagem):
             servidor.login(EMAIL_ORIGEM, EMAIL_SENHA)
             servidor.sendmail(EMAIL_ORIGEM, EMAIL_DESTINO, msg.as_string())
     except Exception as erro:
-        print("Erro ao enviar e-mail:", erro)
+        print(f"Erro ao enviar e-mail: {erro}", flush=True)
 
 @app.route("/pionexbot", methods=["POST"])
 def receber_alerta():
-    dados = request.json
-    par = dados.get("pair", "").replace("/", "").upper()
-    sinal = dados.get("signal", "").lower()
-    valor_personalizado = dados.get("amount")
+    try:
+        dados = request.json
+        par = dados.get("pair", "").replace("/", "").upper()
+        sinal = dados.get("signal", "").lower()
+        valor_personalizado = dados.get("amount")
 
-    if not par or sinal not in ["buy", "sell"]:
-        return "Sinal ou par inválido", 400
+        if not par or sinal not in ["buy", "sell"]:
+            return "Sinal ou par inválido", 400
 
-    if valor_personalizado is not None:
-        try:
-            valor_usdt = float(valor_personalizado)
-        except:
-            return "Valor de 'amount' inválido", 400
-    else:
-        valor_usdt = consultar_saldo()
+        # Valor enviado ou consulta saldo
+        if valor_personalizado is not None:
+            try:
+                valor_usdt = float(valor_personalizado)
+            except:
+                return "Valor de 'amount' inválido", 400
+        else:
+            valor_usdt = consultar_saldo()
 
-    resposta = criar_ordem_market(par, sinal, valor_usdt)
+        # Fuso horário
+        fuso = pytz.timezone("America/Sao_Paulo")
+        horario_atual = datetime.now(fuso).strftime("%Y-%m-%d %H:%M:%S")
 
-    fuso_horario = pytz.timezone("America/Sao_Paulo")
-    horario_atual = datetime.now(fuso_horario).strftime("%Y-%m-%d %H:%M:%S")
-    ULTIMO_SINAL["horario"] = horario_atual
-    ULTIMO_SINAL["sinal"] = sinal.upper()
+        print(f"[DEBUG] Sinal recebido: {sinal.upper()} {valor_usdt} USDT no par {par}", flush=True)
 
-    mensagem = f"💹 Sinal: {sinal.upper()} | Par: {par}\n💵 Valor: {valor_usdt} USDT\n📨 Resposta:\n{json.dumps(resposta, indent=2)}"
-    enviar_email(mensagem)
+        resposta = criar_ordem_market(par, sinal, valor_usdt)
 
-    return jsonify(resposta)
+        print(f"[{horario_atual}] ORDEM ENVIADA: {sinal.upper()} {valor_usdt} USDT em {par}", flush=True)
+        print(f"Resposta da API: {json.dumps(resposta, indent=2)}", flush=True)
+
+        mensagem = f"💹 Sinal: {sinal.upper()} | Par: {par}\n💵 Valor: {valor_usdt} USDT\n🕒 Horário: {horario_atual}\n📨 Resposta:\n{json.dumps(resposta, indent=2)}"
+        enviar_email(mensagem)
+
+        # Atualiza status
+        ULTIMO_SINAL["horario"] = horario_atual
+        ULTIMO_SINAL["sinal"] = sinal.upper()
+
+        return jsonify(resposta)
+
+    except Exception as e:
+        print(f"[ERRO] Falha no processamento: {e}", flush=True)
+        return jsonify({"erro": str(e)}), 500
 
 @app.route("/status", methods=["GET"])
 def status():

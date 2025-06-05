@@ -112,9 +112,16 @@ def receive_signal():
         method = "POST"
         path = "/api/v1/trade/order"
         query = ""
-        body = f'{{"symbol":"{pair}","side":"{signal}","quoteOrderQty":{amount}}}'
+        body_dict = {
+            "symbol": pair,
+            "side": signal,
+            "quoteOrderQty": amount
+        }
 
-        timestamp, signature = sign_request(method, path, query, body)
+        # Assinar usando o corpo JSON como string
+        body_str = f'{{"symbol":"{pair}","side":"{signal}","quoteOrderQty":{amount}}}'
+        timestamp, signature = sign_request(method, path, query, body_str)
+
         headers = {
             "PIONEX-KEY": API_KEY,
             "PIONEX-SIGNATURE": signature,
@@ -122,7 +129,7 @@ def receive_signal():
             "Content-Type": "application/json"
         }
 
-        response = requests.post(BASE_URL + path, headers=headers, data=body)
+        response = requests.post(BASE_URL + path, headers=headers, json=body_dict)
         res_json = response.json()
 
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")

@@ -31,63 +31,66 @@ def get_timestamp():
 def sign_query(query_string: str) -> str:
     return hmac.new(API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
 
-# === CONSULTA SALDO DISPONÍVEL EM USDT COM LOG DETALHADO ===
+# === CONSULTA SALDO DISPONÍVEL EM USDT ===
 def get_balance_usdt():
     try:
         timestamp = get_timestamp()
         query = f"timestamp={timestamp}"
         signature = sign_query(query)
         url = f"{BASE_URL}/api/v3/account?{query}&signature={signature}"
-        headers = {
-            "X-MBX-APIKEY": API_KEY
-        }
+        headers = { "X-MBX-APIKEY": API_KEY }
 
-        print(f"\n🔍 Consultando saldo na URL: {url}")
         response = requests.get(url, headers=headers)
         data = response.json()
-        print("📊 Resposta da API Binance:", data)
+
+        print("📊 Resposta da Binance (saldo):", data)
 
         if "balances" in data:
             for asset in data["balances"]:
                 if asset["asset"] == "USDT":
-                    valor = asset.get("free", "0")
-                    print(f"💰 Saldo disponível em USDT (free): {valor}")
-                    return float(valor)
+                    return float(asset["free"])
     except Exception as e:
         print(f"❌ Erro ao consultar saldo: {e}")
     return 0.0
 
-# === ROTA DE STATUS DO BOT ===
+# === ROTA DE STATUS ===
 @app.route("/status", methods=["GET"])
 def status():
     status_data["hora_servidor"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(status_data)
 
-# === ROTA PRINCIPAL PARA RECEBER SINAIS ===
+# === ROTA PRINCIPAL DE ORDENS ===
 @app.route("/pionexbot", methods=["POST"])
 def receive_signal():
-    data = request.get_json()
-    print("📥 Dados recebidos:", data)
-
-    pair = data.get("pair")
-    signal = data.get("signal")
-    amount = data.get("amount")
-
     try:
+        print("\n📥 Requisição recebida em /pionexbot")
+        print("➡ Headers:", dict(request.headers))
+        print("➡ Raw body:", request.data)
+
+        data = request.get_json(silent=True)
+
+        if data is None:
+            print("❌ Erro: JSON malformado ou vazio.")
+            return jsonify({"error": "JSON inválido ou ausente."}), 400
+
+        print("📦 JSON recebido:", data)
+
+        pair = data.get("pair")
+        signal = data.get("signal")
+        amount = data.get("amount")
+
         if not pair or not signal:
             return jsonify({"error": "Parâmetros obrigatórios ausentes: 'pair' ou 'signal'."}), 400
 
         if not amount:
             amount = get_balance_usdt()
             if amount <= 0:
-                print("❌ Saldo insuficiente detectado.")
                 return jsonify({"error": "Saldo insuficiente para executar ordem."}), 400
         else:
             amount = float(amount)
 
-        side = signal.upper()  # BUY ou SELL
+        side = signal.upper()
         timestamp = get_timestamp()
-
         query_string = f"symbol={pair}&side={side}&type=MARKET&quoteOrderQty={amount}&timestamp={timestamp}"
         signature = sign_query(query_string)
 
@@ -97,7 +100,7 @@ def receive_signal():
             "Content-Type": "application/x-www-form-urlencoded"
         }
 
-        print("\n🚀 Enviando ordem para Binance")
+        print("\n📤 Enviando ordem para Binance")
         print("🪙 Par:", pair)
         print("📈 Sinal:", side)
         print("💵 Quantidade:", amount)
@@ -105,8 +108,7 @@ def receive_signal():
 
         response = requests.post(url, headers=headers)
         res_json = response.json()
-
-        print("📥 Resposta:", response.status_code, res_json)
+        print("📥 Resposta da Binance:", response.status_code, res_json)
 
         # Atualiza status
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -121,6 +123,6 @@ def receive_signal():
         print(f"❌ ERRO INTERNO: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# === EXECUÇÃO LOCAL OU RENDER ===
+# === EXECUÇÃO LOCAL/RENDER ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=True)

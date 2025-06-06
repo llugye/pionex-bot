@@ -29,7 +29,7 @@ status_data = {
     "status": "online",
     "ultimo_horario": None,
     "ultimo_sinal": None,
-    "versao": "1.0.3" # Versão atualizada para refletir a confirmação da lógica de mercado
+    "versao": "1.0.4" # Versão atualizada
 }
 
 app = Flask(__name__)
@@ -310,4 +310,6 @@ if __name__ == "__main__":
     # ou padrão 10000 para execução local.
     port = int(os.environ.get("PORT", 10000))
     print(f"🚀 Bot Pionex rodando na porta {port}. Verifique os logs na Render após o deploy.")
-    app.run(host="0.0.0.0", port=port)
+    # DEBUG=TRUE Adicionado para ajudar a ver mais logs durante a depuração.
+    # Lembre-se de REMOVER isso para ambiente de produção!
+    app.run(host="0.0.0.0", port=port, debug=True)

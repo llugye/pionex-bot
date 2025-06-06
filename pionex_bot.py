@@ -42,54 +42,58 @@ def get_balance_usdt():
             "X-MBX-APIKEY": API_KEY
         }
 
-        print("🔄 Consultando saldo de USDT...")
+        print(f"\n🔍 [DEBUG] Consultando saldo na Binance:")
+        print(f"🔗 URL: {url}")
+        print(f"📩 Headers: {headers}")
+
         response = requests.get(url, headers=headers)
         data = response.json()
-        print("📥 Resposta da Binance (saldo):", data)
+
+        print(f"📥 Resposta da Binance (saldo): {data}")
 
         if "balances" in data:
             for asset in data["balances"]:
                 if asset["asset"] == "USDT":
-                    free = float(asset.get("free", 0))
-                    print(f"💰 Saldo USDT detectado: {free}")
-                    return free
+                    saldo = float(asset.get("free", 0))
+                    print(f"💰 Saldo USDT encontrado: {saldo}")
+                    return saldo
+
     except Exception as e:
         print(f"❌ Erro ao consultar saldo: {e}")
     return 0.0
 
-# === ROTA DE STATUS DO BOT ===
+# === ROTA DE STATUS ===
 @app.route("/status", methods=["GET"])
 def status():
     status_data["hora_servidor"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(status_data)
 
-# === ROTA PRINCIPAL PARA RECEBER SINAIS ===
+# === ROTA PRINCIPAL DO BOT ===
 @app.route("/pionexbot", methods=["POST"])
 def receive_signal():
-    data = request.get_json()
-    print("\n📡 Dados recebidos:", data)
-
-    pair = data.get("pair")
-    signal = data.get("signal")
-    amount = data.get("amount")
-
     try:
+        data = request.get_json()
+        print(f"\n📩 Sinal recebido: {data}")
+
+        pair = data.get("pair")
+        signal = data.get("signal")
+        amount = data.get("amount")
+
         if not pair or not signal:
-            print("⚠️ Falta de parâmetros obrigatórios.")
+            print("⚠️ Erro: parâmetros ausentes.")
             return jsonify({"error": "Parâmetros obrigatórios ausentes: 'pair' ou 'signal'."}), 400
 
         if not amount:
-            print("🔍 Nenhum amount informado, buscando saldo...")
+            print("🔍 Nenhum amount informado. Buscando saldo em USDT...")
             amount = get_balance_usdt()
             if amount <= 0:
-                print("❌ Saldo insuficiente para executar ordem.")
+                print("❌ Saldo insuficiente ou saldo não encontrado.")
                 return jsonify({"error": "Saldo insuficiente para executar ordem."}), 400
         else:
             amount = float(amount)
 
         side = signal.upper()
         timestamp = get_timestamp()
-
         query_string = f"symbol={pair}&side={side}&type=MARKET&quoteOrderQty={amount}&timestamp={timestamp}"
         signature = sign_query(query_string)
 
@@ -99,16 +103,18 @@ def receive_signal():
             "Content-Type": "application/x-www-form-urlencoded"
         }
 
-        print("\n🚀 Enviando ordem para Binance")
+        print("\n📤 Enviando ordem para Binance")
         print("🪙 Par:", pair)
         print("📈 Sinal:", side)
         print("💵 Quantidade:", amount)
-        print("🔐 Assinatura:", signature)
+        print("📦 URL:", url)
 
         response = requests.post(url, headers=headers)
         res_json = response.json()
-        print("📥 Resposta da Binance:", response.status_code, res_json)
 
+        print("📥 Resposta da ordem:", response.status_code, res_json)
+
+        # Atualiza status
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         status_data["ultimo_sinal"] = f"{side} {pair}"
 
@@ -121,7 +127,6 @@ def receive_signal():
         print(f"❌ ERRO INTERNO: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# === EXECUÇÃO LOCAL OU RENDER ===
+# === EXECUÇÃO ===
 if __name__ == "__main__":
-    print("🔧 Iniciando bot em modo debug...")
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=True)
+    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))

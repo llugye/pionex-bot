@@ -12,10 +12,10 @@ API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 BASE_URL = "https://api.binance.com"
 
-# === PROXY PARA EVITAR RESTRIÇÃO DE REGIÃO ===
-PROXY = {
-    "http": "http://134.122.58.174:80",
-    "https": "http://134.122.58.174:80"
+# === PROXY FUNCIONAL ===
+PROXIES = {
+    "http": "http://178.62.193.19:3128",
+    "https": "http://178.62.193.19:3128"
 }
 
 # === STATUS DO BOT ===
@@ -23,7 +23,7 @@ status_data = {
     "status": "online",
     "ultimo_horario": None,
     "ultimo_sinal": None,
-    "versao": "2.0.0-binance-debug"
+    "versao": "2.0.0-binance-proxy"
 }
 
 app = Flask(__name__)
@@ -44,22 +44,19 @@ def get_balance_usdt():
         query = f"timestamp={timestamp}"
         signature = sign_query(query)
         url = f"{BASE_URL}/api/v3/account?{query}&signature={signature}"
-        headers = {
-            "X-MBX-APIKEY": API_KEY
-        }
+        headers = {"X-MBX-APIKEY": API_KEY}
 
-        print(f"[DEBUG] Consultando saldo em: {url}")
-        response = requests.get(url, headers=headers, proxies=PROXY)
+        print(f"🔄 Verificando saldo em USDT...")
+        response = requests.get(url, headers=headers, proxies=PROXIES)
         data = response.json()
-        print(f"[DEBUG] Resposta saldo: {data}")
+        print("🧾 Retorno saldo:", data)
 
         if "balances" in data:
             for asset in data["balances"]:
                 if asset["asset"] == "USDT":
                     saldo = float(asset["free"])
-                    print(f"[INFO] Saldo disponível em USDT: {saldo}")
+                    print(f"💰 Saldo disponível: {saldo} USDT")
                     return saldo
-
     except Exception as e:
         print(f"❌ Erro ao consultar saldo: {e}")
     return 0.0
@@ -73,14 +70,12 @@ def status():
 # === ROTA PRINCIPAL PARA RECEBER SINAIS ===
 @app.route("/pionexbot", methods=["POST"])
 def receive_signal():
+    data = request.get_json()
+    pair = data.get("pair")        # Ex: BTCUSDT
+    signal = data.get("signal")    # Ex: buy ou sell
+    amount = data.get("amount")    # Ex: 5
+
     try:
-        data = request.get_json(force=True)
-        pair = data.get("pair")        # Ex: BTCUSDT
-        signal = data.get("signal")    # Ex: buy ou sell
-        amount = data.get("amount")    # Ex: 5 (opcional)
-
-        print(f"[DEBUG] Dados recebidos: {data}")
-
         if not pair or not signal:
             return jsonify({"error": "Parâmetros obrigatórios ausentes: 'pair' ou 'signal'."}), 400
 
@@ -103,15 +98,15 @@ def receive_signal():
             "Content-Type": "application/x-www-form-urlencoded"
         }
 
-        print("\n📤 Enviando ordem para Binance")
+        print("\n📤 Enviando ordem para Binance via proxy")
         print("🪙 Par:", pair)
         print("📈 Sinal:", side)
-        print("💵 Quantidade:", amount)
+        print("💵 Quantidade (USDT):", amount)
         print("🔗 URL:", url)
 
-        response = requests.post(url, headers=headers, proxies=PROXY)
+        response = requests.post(url, headers=headers, proxies=PROXIES)
         res_json = response.json()
-        print("📥 Resposta:", response.status_code, res_json)
+        print("📥 Resposta da Binance:", response.status_code, res_json)
 
         # Atualiza status
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")

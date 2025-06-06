@@ -32,11 +32,11 @@ status_data = {
 app = Flask(__name__)
 tz = pytz.timezone('America/Sao_Paulo')
 
-# === GERA TIMESTAMP EM MILISSEGUNDOS ===
+# === TIMESTAMP EM MILISSEGUNDOS ===
 def get_timestamp() -> str:
     return str(int(datetime.utcnow().timestamp() * 1000))
 
-# === GERA ASSINATURA PARA A API ===
+# === GERA ASSINATURA DA REQUISIÇÃO ===
 def sign_request(method: str, path: str, query: str = '', body: str = '') -> tuple:
     if not API_KEY or not API_SECRET:
         raise EnvironmentError("Erro: API_KEY ou API_SECRET não definidos.")
@@ -63,7 +63,7 @@ def enviar_email(assunto: str, corpo: str):
     except Exception as e:
         print(f"[ERRO AO ENVIAR EMAIL] {e}")
 
-# === CONSULTA SALDO DISPONÍVEL EM USDT COM FALLBACK ===
+# === CONSULTA SALDO DISPONÍVEL EM USDT ===
 def get_balance_usdt() -> float:
     try:
         method = "GET"
@@ -93,13 +93,13 @@ def get_balance_usdt() -> float:
 
     return 0.0
 
-# === ROTA DE STATUS DO BOT ===
+# === ROTA DE STATUS ===
 @app.route("/status", methods=["GET"])
 def status():
     status_data["hora_servidor"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(status_data)
 
-# === ROTA DE RECEBIMENTO DE SINAIS ===
+# === ROTA PRINCIPAL /pionexbot ===
 @app.route("/pionexbot", methods=["POST"])
 def receive_signal():
     data = request.get_json(silent=False)
@@ -135,15 +135,14 @@ def receive_signal():
             "Content-Type": "application/json"
         }
 
-        # DEBUG
         print("\n📤 Enviando ordem para Pionex")
         print("🪙 Par:", pair)
         print("📊 Sinal:", signal)
         print("💵 Quantidade:", amount)
         print("📦 Payload:", body_json)
 
-        response = requests.post(BASE_URL + path, headers=headers, json=body_dict)
-        # response.raise_for_status()  # opcional para debugar erros HTTP
+        # CORREÇÃO PRINCIPAL: usar `data=body_json` em vez de `json=`
+        response = requests.post(BASE_URL + path, headers=headers, data=body_json)
         print("📥 Resposta:", response.status_code, response.text)
 
         try:
@@ -151,7 +150,6 @@ def receive_signal():
         except Exception:
             res_json = {"error": "Erro ao interpretar resposta da API da Pionex."}
 
-        # Atualiza status
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         status_data["ultimo_sinal"] = f"{signal.upper()} {pair}"
 
@@ -167,6 +165,6 @@ def receive_signal():
         enviar_email("❌ ERRO INTERNO", str(e))
         return jsonify({"error": str(e)}), 500
 
-# === INICIALIZAÇÃO ===
+# === EXECUÇÃO LOCAL ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

@@ -33,11 +33,11 @@ app = Flask(__name__)
 tz = pytz.timezone('America/Sao_Paulo')
 
 # === GERA TIMESTAMP EM MILISSEGUNDOS ===
-def get_timestamp():
+def get_timestamp() -> str:
     return str(int(datetime.utcnow().timestamp() * 1000))
 
 # === GERA ASSINATURA PARA A API ===
-def sign_request(method, path, query='', body=''):
+def sign_request(method: str, path: str, query: str = '', body: str = '') -> tuple:
     if not API_KEY or not API_SECRET:
         raise EnvironmentError("Erro: API_KEY ou API_SECRET não definidos.")
     timestamp = get_timestamp()
@@ -48,7 +48,7 @@ def sign_request(method, path, query='', body=''):
     return timestamp, signature
 
 # === ENVIA E-MAIL ===
-def enviar_email(assunto, corpo):
+def enviar_email(assunto: str, corpo: str):
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_ORIGEM
@@ -63,30 +63,35 @@ def enviar_email(assunto, corpo):
     except Exception as e:
         print(f"[ERRO AO ENVIAR EMAIL] {e}")
 
-# === CONSULTA SALDO DISPONÍVEL EM USDT ===
-def get_balance_usdt():
+# === CONSULTA SALDO DISPONÍVEL EM USDT COM FALLBACK ===
+def get_balance_usdt() -> float:
     try:
         method = "GET"
         path = "/api/v1/account/balances"
-        query = ""
-        timestamp, signature = sign_request(method, path, query)
+        timestamp, signature = sign_request(method, path)
         headers = {
             "PIONEX-KEY": API_KEY,
             "PIONEX-SIGNATURE": signature,
             "timestamp": timestamp
         }
+
         response = requests.get(BASE_URL + path, headers=headers)
         data = response.json()
 
         if data.get("result"):
             for coin in data["data"]["balances"]:
                 if coin["coin"] == "USDT":
-                    return float(coin["free"])
+                    valor = coin.get("free") or coin.get("available") or "0"
+                    saldo = float(valor)
+                    print(f"💰 Saldo disponível em USDT: {saldo}")
+                    return saldo
+
     except requests.exceptions.RequestException as e:
         print(f"❌ Erro de requisição ao consultar saldo: {e}")
     except Exception as e:
-        print(f"❌ Erro ao converter saldo: {e}")
-    return 0
+        print(f"❌ Erro ao processar saldo: {e}")
+
+    return 0.0
 
 # === ROTA DE STATUS DO BOT ===
 @app.route("/status", methods=["GET"])
@@ -97,7 +102,7 @@ def status():
 # === ROTA DE RECEBIMENTO DE SINAIS ===
 @app.route("/pionexbot", methods=["POST"])
 def receive_signal():
-    data = request.get_json(force=True)
+    data = request.get_json(silent=False)
     pair = data.get("pair")
     signal = data.get("signal")
     amount = data.get("amount")
@@ -115,14 +120,13 @@ def receive_signal():
 
         method = "POST"
         path = "/api/v1/trade/order"
-        query = ""
         body_dict = {
             "symbol": pair,
             "side": signal.lower(),
             "quoteOrderQty": amount
         }
         body_json = json.dumps(body_dict)
-        timestamp, signature = sign_request(method, path, query, body_json)
+        timestamp, signature = sign_request(method, path, '', body_json)
 
         headers = {
             "PIONEX-KEY": API_KEY,
@@ -131,7 +135,7 @@ def receive_signal():
             "Content-Type": "application/json"
         }
 
-        # DEBUG PRINTS
+        # DEBUG
         print("\n📤 Enviando ordem para Pionex")
         print("🪙 Par:", pair)
         print("📊 Sinal:", signal)
@@ -139,6 +143,7 @@ def receive_signal():
         print("📦 Payload:", body_json)
 
         response = requests.post(BASE_URL + path, headers=headers, json=body_dict)
+        # response.raise_for_status()  # opcional para debugar erros HTTP
         print("📥 Resposta:", response.status_code, response.text)
 
         try:
@@ -146,7 +151,7 @@ def receive_signal():
         except Exception:
             res_json = {"error": "Erro ao interpretar resposta da API da Pionex."}
 
-        # Atualiza status do bot
+        # Atualiza status
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
         status_data["ultimo_sinal"] = f"{signal.upper()} {pair}"
 
@@ -154,7 +159,7 @@ def receive_signal():
             enviar_email("✅ ORDEM EXECUTADA", f"{signal.upper()} {pair} com {amount} USDT")
             return jsonify({"success": True, "response": res_json})
         else:
-            enviar_email("❌ ERRO NA ORDEM", str(res_json))
+            enviar_email("❌ ERRO NA ORDEM", json.dumps(res_json))
             return jsonify({"error": res_json}), 400
 
     except Exception as e:

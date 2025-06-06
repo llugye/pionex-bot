@@ -31,7 +31,7 @@ def get_timestamp():
 def sign_query(query_string: str) -> str:
     return hmac.new(API_SECRET.encode(), query_string.encode(), hashlib.sha256).hexdigest()
 
-# === CONSULTA SALDO DISPONÍVEL EM USDT ===
+# === CONSULTA SALDO DISPONÍVEL EM USDT COM LOG DETALHADO ===
 def get_balance_usdt():
     try:
         timestamp = get_timestamp()
@@ -42,58 +42,52 @@ def get_balance_usdt():
             "X-MBX-APIKEY": API_KEY
         }
 
-        print(f"\n🔍 [DEBUG] Consultando saldo na Binance:")
-        print(f"🔗 URL: {url}")
-        print(f"📩 Headers: {headers}")
-
+        print(f"\n🔍 Consultando saldo na URL: {url}")
         response = requests.get(url, headers=headers)
         data = response.json()
-
-        print(f"📥 Resposta da Binance (saldo): {data}")
+        print("📊 Resposta da API Binance:", data)
 
         if "balances" in data:
             for asset in data["balances"]:
                 if asset["asset"] == "USDT":
-                    saldo = float(asset.get("free", 0))
-                    print(f"💰 Saldo USDT encontrado: {saldo}")
-                    return saldo
-
+                    valor = asset.get("free", "0")
+                    print(f"💰 Saldo disponível em USDT (free): {valor}")
+                    return float(valor)
     except Exception as e:
         print(f"❌ Erro ao consultar saldo: {e}")
     return 0.0
 
-# === ROTA DE STATUS ===
+# === ROTA DE STATUS DO BOT ===
 @app.route("/status", methods=["GET"])
 def status():
     status_data["hora_servidor"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     return jsonify(status_data)
 
-# === ROTA PRINCIPAL DO BOT ===
+# === ROTA PRINCIPAL PARA RECEBER SINAIS ===
 @app.route("/pionexbot", methods=["POST"])
 def receive_signal():
+    data = request.get_json()
+    print("📥 Dados recebidos:", data)
+
+    pair = data.get("pair")
+    signal = data.get("signal")
+    amount = data.get("amount")
+
     try:
-        data = request.get_json()
-        print(f"\n📩 Sinal recebido: {data}")
-
-        pair = data.get("pair")
-        signal = data.get("signal")
-        amount = data.get("amount")
-
         if not pair or not signal:
-            print("⚠️ Erro: parâmetros ausentes.")
             return jsonify({"error": "Parâmetros obrigatórios ausentes: 'pair' ou 'signal'."}), 400
 
         if not amount:
-            print("🔍 Nenhum amount informado. Buscando saldo em USDT...")
             amount = get_balance_usdt()
             if amount <= 0:
-                print("❌ Saldo insuficiente ou saldo não encontrado.")
+                print("❌ Saldo insuficiente detectado.")
                 return jsonify({"error": "Saldo insuficiente para executar ordem."}), 400
         else:
             amount = float(amount)
 
-        side = signal.upper()
+        side = signal.upper()  # BUY ou SELL
         timestamp = get_timestamp()
+
         query_string = f"symbol={pair}&side={side}&type=MARKET&quoteOrderQty={amount}&timestamp={timestamp}"
         signature = sign_query(query_string)
 
@@ -103,16 +97,16 @@ def receive_signal():
             "Content-Type": "application/x-www-form-urlencoded"
         }
 
-        print("\n📤 Enviando ordem para Binance")
+        print("\n🚀 Enviando ordem para Binance")
         print("🪙 Par:", pair)
         print("📈 Sinal:", side)
         print("💵 Quantidade:", amount)
-        print("📦 URL:", url)
+        print("🔗 URL:", url)
 
         response = requests.post(url, headers=headers)
         res_json = response.json()
 
-        print("📥 Resposta da ordem:", response.status_code, res_json)
+        print("📥 Resposta:", response.status_code, res_json)
 
         # Atualiza status
         status_data["ultimo_horario"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -127,6 +121,6 @@ def receive_signal():
         print(f"❌ ERRO INTERNO: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# === EXECUÇÃO ===
+# === EXECUÇÃO LOCAL OU RENDER ===
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=True)
